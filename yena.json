@@ -1,0 +1,10 @@
+{
+	"name": "project",
+	"version": "0.1.0",
+	"description": "Project management: mounted projects are read-only until isolated; stages copy a project for parallel work",
+	"runtime": "node",
+	"entry": "src/index.ts",
+	"dependencies": {
+		"md": "git@github.com:hyenayena/md.git"
+	}
+}
