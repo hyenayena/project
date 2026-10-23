@@ -3,16 +3,17 @@ import path from 'node:path';
 import type {ModulePlugin} from '../../../src/api.js';
 import {createProjectCommand} from './commands.js';
 import {noopLog} from './log.js';
+import {docsRootFor} from './public.js';
 import {type Layout, readState, STATE_FILE, writeState} from './state.js';
 
 export const WORKPLACE_DIR = '/workplace';
 export const STAGE_DIR = '/stage';
 
-/** md/projects/<name> in the md module's hub (<YENA_DATA>/md). */
+/** Docs in the md module's hub: <hub>/projects/<name>. */
 export const layoutFor = (dataDir: string, base: Partial<Layout> = {}): Layout => ({
 	workplace: base.workplace ?? WORKPLACE_DIR,
 	stage: base.stage ?? STAGE_DIR,
-	md: base.md ?? path.join(path.dirname(dataDir), 'md', 'projects'),
+	md: base.md ?? docsRootFor(dataDir),
 });
 
 export function createPlugin(base: Partial<Layout> = {}): ModulePlugin {

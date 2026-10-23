@@ -1,15 +1,11 @@
 import {randomBytes} from 'node:crypto';
 import {mkdirSync, readFileSync, renameSync, writeFileSync} from 'node:fs';
 import path from 'node:path';
+import {isProjectName, NAME_RE, STATE_FILE, STATE_VERSION} from './public.js';
 
-/**
- * The state file is a contract: the claude module reads it on every file access to decide which
- * project paths are writable. Change its shape only together with the claude module's reader.
- */
-export const STATE_VERSION = 1;
-export const STATE_FILE = 'state.json';
-
-export const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+// The state file is read by other modules only through src/public.ts (accessReader, isolatedProjects),
+// which must change together with this writer.
+export {NAME_RE, STATE_FILE, STATE_VERSION};
 const SESSION_RE = /^[0-9a-f]{8}$/;
 const SHA_RE = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 
@@ -40,7 +36,7 @@ export type Session = {
 
 export type ProjectState = Layout & {v: typeof STATE_VERSION; session: Session | null};
 
-export const isName = (v: unknown): v is string => typeof v === 'string' && NAME_RE.test(v) && v !== '.' && v !== '..';
+export const isName = isProjectName;
 
 export function checkName(v: string | undefined): string {
 	if (!isName(v)) throw new Error('Invalid project name: use letters, digits, ".", "_" or "-" (up to 64)');

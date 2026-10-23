@@ -30,7 +30,7 @@ Started by the first `isolate` or `stage make`, ended by `finish`. It is not tie
 
 ## How the read-only rule is enforced
 
-The module writes its state to `<YENA_DATA>/project/state.json` (atomically, also at load so the paths are known before any command). This file is a contract with the claude module, which reads it on every file access:
+The module writes its state to `<YENA_DATA>/project/state.json` (atomically, also at load so the paths are known before any command). Other modules never read this file themselves: they use the public entry `src/public.ts` (`accessReader(dataDir)` with `read`/`readSync` returning roots, docs and writable folders, `isolatedProjects`, `docsRootFor`, `stateFileFor`, `isProjectName`), the one reader of the format. The claude module loads it as an optional dependency and asks it on every file access. The file looks like this:
 
 ```json
 {
@@ -56,13 +56,13 @@ Before a change, the user says which projects it touches, or the architect asks 
 
 ## Layout
 
-`src/`: `index.ts` (plugin, layout, state at load), `commands.ts` (the `project` command, one state change at a time), `state.ts` (names, state file), `projects.ts` (listing), `stage.ts` (make, apply, remove), `git.ts` (the only place that spawns: `git` without a shell, `safe.directory` for that call only, credential variables removed, 120 s timeout).
+`src/`: `public.ts` (the public entry above; pure), `deps/md.ts` (the only import of another module: md's `hubDirFor`), `index.ts` (plugin, layout, state at load), `commands.ts` (the `project` command, one state change at a time), `state.ts` (names, state file), `projects.ts` (listing), `stage.ts` (make, apply, remove), `git.ts` (the only place that spawns: `git` without a shell, `safe.directory` for that call only, credential variables removed, 120 s timeout).
 
 Tests: `npm test` in this directory (they need `git`).
 
 ## Residual risks
 
-- Only Edit and Write are confined. Bash can write anywhere; the claude module only refuses Bash commands that name `project/state.json`.
+- Only Edit and Write are confined. Bash can write anywhere; the claude module only refuses Bash commands that name this module's data dir.
 - Symlinked project folders are not listed (the write check resolves symlinks, so they could never be written).
 - A stage copy cannot be cancelled midway and may take long for big folders; the assistant's command timeout still applies to the result.
 - `finish` deletes stages whose changes were never applied.
