@@ -27,7 +27,7 @@ const run = async (...args: string[]): Promise<string> => {
 describe('project command', () => {
 	it('declares agent policies: list is safe, everything that changes access asks', () => {
 		const policy = Object.fromEntries((command.subcommands ?? []).map(s => [s.name, s.agent]));
-		assert.deepEqual(policy, {list: 'safe', isolate: 'confirm', stage: 'confirm', finish: 'confirm', help: 'safe'});
+		assert.deepEqual(policy, {list: 'safe', new: 'confirm', isolate: 'confirm', stage: 'confirm', finish: 'confirm', help: 'safe'});
 		assert.equal(command.agent, 'confirm');
 	});
 
@@ -50,6 +50,21 @@ describe('project command', () => {
 		assert.ok(existsSync(path.join(layout.md, 'api')));
 		assert.deepEqual(state().session.isolated, ['api', 'notes']);
 		assert.match(await run('list'), /^ {2}api +files, docs +isolated$/m);
+	});
+
+	it('creates docs-only projects, never over an existing one', async () => {
+		await assert.rejects(run('new'), /Usage: project new <project>/);
+		await assert.rejects(run('new', 'a', 'b'), /Usage: project new <project>/);
+		await assert.rejects(run('new', '../evil'), /Invalid project name/);
+		await assert.rejects(run('new', 'api'), /Project api already exists/);
+		await assert.rejects(run('new', 'notes'), /Project notes already exists/);
+		const out = await run('new', 'draft');
+		assert.match(out, /^Created docs-only project draft: /);
+		assert.match(out, /run "project isolate draft"/);
+		assert.ok(existsSync(path.join(layout.md, 'draft')));
+		assert.ok(!existsSync(path.join(layout.workplace, 'draft')));
+		assert.match(await run('list'), /^ {2}draft +docs only$/m);
+		assert.ok(!state().session?.isolated.includes('draft'), 'a new project is not isolated');
 	});
 
 	it('makes stages with unique ids and prints only the absolute path', async () => {

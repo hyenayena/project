@@ -12,6 +12,7 @@ Project management for yena, as a plugin (depends on `md`). yena can change its 
 | Command | Agent policy | What it does |
 |---|---|---|
 | `project list` | safe | Projects (files / docs), which are isolated, their stages, the work session |
+| `project new <name>` | confirm | Creates a docs-only project: an empty docs folder `<YENA_DATA>/md/projects/<name>/`, no folder in `/workplace`. Refuses a name that is already a project (files or docs). The new project is not isolated. |
 | `project isolate <name>…` | confirm | Makes the projects writable for the work session: folder, docs folder (created when missing) and stages. Adds to what is already isolated. |
 | `project stage make <name>` | confirm | Copies the project folder into a new stage and prints only its absolute path |
 | `project stage apply <name> <stageid>` | confirm | Moves the stage's changes into `/workplace/<name>` as uncommitted changes; the stage is kept |

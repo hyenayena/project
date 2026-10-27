@@ -15,11 +15,12 @@ export type ProjectDeps = {
 	now?: () => Date;
 };
 
-const USAGE = 'project list | isolate <project>… | stage make <project> | stage apply <project> <stageid> | finish';
+const USAGE = 'project list | new <project> | isolate <project>… | stage make <project> | stage apply <project> <stageid> | finish';
 
 const HELP = [
 	`Usage: ${USAGE}`,
 	'  list                              List the projects, what is isolated and the stages',
+	'  new <project>                     Create a docs-only project: an empty docs folder, no workplace folder',
 	'  isolate <project>…                Make projects and their docs writable for this work session',
 	'  stage make <project>              Copy a project into a new stage; prints the stage path',
 	'  stage apply <project> <stageid>   Move a stage\'s changes into the project (as uncommitted changes)',
@@ -75,6 +76,18 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 			lines.push(`Work session ${s.id}: ${iso}, ${plural(s.stages.length, 'stage')}.`);
 		}
 		return lines.join('\n');
+	};
+
+	const create = async (name: string): Promise<string> => {
+		const project = checkName(name);
+		if (findProject(layout, project)) throw new Error(`Project ${project} already exists. Run "project list"`);
+		const dir = path.join(layout.md, project);
+		await mkdir(dir, {recursive: true});
+		log.info('project created');
+		return [
+			`Created docs-only project ${project}: ${dir}`,
+			`It is read-only like every project; run "project isolate ${project}" to work on it.`,
+		].join('\n');
 	};
 
 	const isolate = async (names: string[]): Promise<string> => {
@@ -168,6 +181,7 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 		agent: 'confirm',
 		subcommands: [
 			{name: 'list', aliases: ['ls'], usage: 'project list', description: 'List projects, isolation and stages', agent: 'safe'},
+			{name: 'new', usage: 'project new <project>', description: 'Create a docs-only project', agent: 'confirm'},
 			{name: 'isolate', usage: 'project isolate <project>…', description: 'Make projects writable for this work session', agent: 'confirm'},
 			{
 				name: 'stage',
@@ -192,6 +206,10 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 				case 'ls':
 					exact(0, 'project list');
 					ctx.print(await serial(async () => list()));
+					return;
+				case 'new':
+					exact(1, 'project new <project>');
+					ctx.print(await serial(() => create(rest[0] as string)));
 					return;
 				case 'isolate':
 					ctx.print(await serial(() => isolate(rest)));
