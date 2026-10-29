@@ -15,10 +15,6 @@ function childEnv(extra: Record<string, string> | undefined): NodeJS.ProcessEnv 
 	return env;
 }
 
-/**
- * The only place that spawns. No shell. Mounted projects are often owned by another uid than the
- * container's root, so the repo is marked safe for this call only.
- */
 export const runGit: Git = (cwd, args, options = {}) =>
 	new Promise((resolve, reject) => {
 		const child = spawn('git', ['-c', `safe.directory=${cwd}`, ...args], {

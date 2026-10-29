@@ -15,7 +15,6 @@ export type ProjectDeps = {
 	now?: () => Date;
 };
 
-// The one-line form in usage errors.
 const LINE = 'project list | new <project> | isolate <project>… | stage make <project> | stage apply <project> <stageid> | finish';
 const USAGE = 'project <subcommand>';
 const PROJECT = {name: 'project', description: 'A project in the workplace or a docs-only one'};
@@ -71,7 +70,6 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 	const now = deps.now ?? (() => new Date());
 	const file = path.join(deps.dataDir, STATE_FILE);
 
-	// Commands may come from the console and an assistant at once; state changes go one at a time.
 	let queue: Promise<unknown> = Promise.resolve();
 	const serial = <T>(fn: () => Promise<T>): Promise<T> => {
 		const next = queue.then(fn, fn);
@@ -154,7 +152,6 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 		const state = load();
 		const s = startSession(state);
 		const id = s.nextStage;
-		// The id is used up even if the copy fails, so a half-copied leftover is never reused.
 		s.nextStage += 1;
 		save(state);
 		const record = await makeStage({layout, session: s, project, id, git, log});
@@ -213,7 +210,6 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 			}
 		}
 		if (failed.length > 0) {
-			// Read-only again at once; the stages that could not be removed stay listed for the next finish.
 			s.isolated = [];
 			s.stages = failed;
 			save(state);

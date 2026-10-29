@@ -3,18 +3,13 @@ import {mkdirSync, readFileSync, renameSync, writeFileSync} from 'node:fs';
 import path from 'node:path';
 import {isProjectName, NAME_RE, STATE_FILE, STATE_VERSION} from './public.js';
 
-// The state file is read by other modules only through src/public.ts (accessReader, isolatedProjects),
-// which must change together with this writer.
 export {NAME_RE, STATE_FILE, STATE_VERSION};
 const SESSION_RE = /^[0-9a-f]{8}$/;
 const SHA_RE = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 
 export type Layout = {
-	/** Mounted project folders: <workplace>/<name>. */
 	workplace: string;
-	/** Stage copies: <stage>/<name>-stage-<session>-<id>. */
 	stage: string;
-	/** Project docs in the md hub: <md>/<name>. */
 	md: string;
 };
 
@@ -22,15 +17,11 @@ export type StageRecord = {
 	project: string;
 	id: number;
 	path: string;
-	/** The project's HEAD when the stage was made; apply moves the stage's changes since then. */
 	base: string | null;
-	/** Repositories inside the project (relative paths); missing in records made before they were tracked. */
 	nested?: NestedBase[];
-	/** node_modules folders the stage links to instead of copying (relative paths). */
 	links?: string[];
 };
 
-/** A repository inside the project, with its HEAD when the stage was made. */
 export type NestedBase = {path: string; base: string | null};
 
 export type Session = {
@@ -63,7 +54,6 @@ export const MAX_NESTED = 64;
 export const MAX_LINKS = 256;
 const REL_MAX = 4096;
 
-/** A plain relative path inside a project: no `..`, `.`, `.git` or empty segments. */
 export function isRelPath(v: unknown): v is string {
 	if (typeof v !== 'string' || v === '' || v.length > REL_MAX || v.includes('\0')) return false;
 	if (path.posix.isAbsolute(v) || path.posix.normalize(v) !== v) return false;
@@ -102,7 +92,6 @@ function parseSession(raw: unknown, layout: Layout): Session | null {
 		if (!isRecord(s) || !isName(s.project) || !Number.isSafeInteger(s.id)) throw new Error('stage');
 		const sid = s.id as number;
 		if (sid < 1 || sid >= (nextStage as number)) throw new Error('stage id');
-		// A stage path is always derived, so a tampered file cannot point finish at another folder.
 		if (s.path !== stageDir(layout, s.project, id, sid)) throw new Error('stage path');
 		if (!isBase(s.base)) throw new Error('stage base');
 		const record: StageRecord = {project: s.project, id: sid, path: s.path, base: s.base};
@@ -113,7 +102,6 @@ function parseSession(raw: unknown, layout: Layout): Session | null {
 	return {id, startedAt, isolated: [...isolated] as string[], nextStage: nextStage as number, stages: out};
 }
 
-/** Missing file: a fresh state. Unreadable or invalid: throws, so stages are never forgotten silently. */
 export function readState(file: string, layout: Layout): ProjectState {
 	let text: string;
 	try {
@@ -125,14 +113,12 @@ export function readState(file: string, layout: Layout): ProjectState {
 	try {
 		const raw: unknown = JSON.parse(text);
 		if (!isRecord(raw) || raw.v !== STATE_VERSION) throw new Error('version');
-		// Paths always come from the current layout; stage paths are checked against it.
 		return {v: STATE_VERSION, ...layout, session: parseSession(raw.session ?? null, layout)};
 	} catch {
 		throw new Error(`The project state file ${file} is invalid; fix or delete it (stages listed in it are then not removed by finish)`);
 	}
 }
 
-/** Atomic: readers (other processes) see either the old or the new file. */
 export function writeState(file: string, state: ProjectState): void {
 	mkdirSync(path.dirname(file), {recursive: true});
 	const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;

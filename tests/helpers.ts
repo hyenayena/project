@@ -28,7 +28,6 @@ export const git = (cwd: string, ...args: string[]): string =>
 		env: {...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t'},
 	});
 
-/** A repo with one commit holding the given files. */
 export function repo(dir: string, files: Record<string, string>): void {
 	mkdirSync(dir, {recursive: true});
 	git(dir, 'init', '-q', '-b', 'main');

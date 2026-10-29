@@ -33,7 +33,6 @@ async function isTopLevel(git: Git, dir: string): Promise<boolean> {
 	return (await realpath(top)) === (await realpath(dir));
 }
 
-/** The folder must be the top level of its own repository (not a folder inside another one). */
 async function requireRepo(git: Git, dir: string, what: string): Promise<void> {
 	if (!(await isTopLevel(git, dir))) throw new Error(`The ${what} ${dir} is not the top level of a git repository`);
 }
@@ -43,11 +42,6 @@ export type ScanLimits = {depth: number; folders: number; repos: number; nodeMod
 
 const SCAN_LIMITS: ScanLimits = {depth: 6, folders: 50_000, repos: MAX_NESTED, nodeModules: MAX_LINKS};
 
-/**
- * Finds the folders below root that hold a `.git` (repository candidates) and the node_modules
- * folders, as sorted relative paths. Symlinks are never followed; node_modules and `.git` are not
- * read into; folders deeper than the depth limit are not read.
- */
 export async function scanTree(root: string, limits: ScanLimits = SCAN_LIMITS): Promise<TreeScan> {
 	const repos: string[] = [];
 	const nodeModules: string[] = [];
@@ -78,7 +72,6 @@ export async function scanTree(root: string, limits: ScanLimits = SCAN_LIMITS): 
 	return {repos: repos.sort(), nodeModules: nodeModules.sort()};
 }
 
-/** The absolute path of rel below root; every segment must be a real folder, not a symlink. */
 async function insideDir(root: string, rel: string): Promise<string> {
 	if (!isRelPath(rel)) throw new Error(`Invalid path ${JSON.stringify(rel)} in ${root}`);
 	let dir = root;
@@ -89,7 +82,6 @@ async function insideDir(root: string, rel: string): Promise<string> {
 	return dir;
 }
 
-/** A `.git` file may point anywhere, e.g. into the original project; the stage must not write there. */
 async function gitDirInside(git: Git, dir: string, root: string): Promise<void> {
 	const r = await git(dir, ['rev-parse', '--absolute-git-dir']);
 	const gitDir = r.stdout.toString('utf8').trim();
@@ -98,7 +90,6 @@ async function gitDirInside(git: Git, dir: string, root: string): Promise<void> 
 	if (!real.startsWith((await realpath(root)) + path.sep)) throw new Error(`${dir} keeps its git data outside the stage`);
 }
 
-/** The deepest repository ('' = the outer one) that contains rel. */
 function owner(rel: string, repos: string[]): string {
 	let best = '';
 	for (const r of repos) if (rel.startsWith(`${r}/`) && r.length > best.length) best = r;
@@ -109,13 +100,8 @@ const relTo = (repo: string, rel: string): string => (repo === '' ? rel : rel.sl
 
 const literalExcludes = (paths: string[]): string[] => paths.map(p => `:(exclude,literal)${p}`);
 
-/** Gitignore pattern that matches exactly this path, a symlink included. */
 const excludeLine = (rel: string): string => `/${rel.replace(/[\\*?[\] ]/g, '\\$&')}\n`;
 
-/**
- * Copies the project folder as it is (uncommitted changes, ignored files, symlinks as links).
- * Ignored node_modules folders become links to the project's own folders instead of copies.
- */
 export async function makeStage(p: {layout: Layout; session: Session; project: string; id: number; git: Git; log?: Logger}): Promise<StageRecord> {
 	const {git} = p;
 	const log = p.log ?? noopLog;
@@ -148,7 +134,6 @@ export async function makeStage(p: {layout: Layout; session: Session; project: s
 			const ignored = await git(dir, ['check-ignore', '-q', '--', sub]);
 			if (ignored.code === 1) continue;
 			if (ignored.code !== 0) throw new Error(`git check-ignore failed in ${dir}: ${clip(ignored.stderr)}`);
-			// An ignore rule does not untrack files already in the index; those must stay real copies.
 			const tracked = await git(dir, ['ls-files', '-z', '--', `:(literal)${sub}`]);
 			if (tracked.code !== 0) throw new Error(`git ls-files failed in ${dir}: ${clip(tracked.stderr)}`);
 			if (tracked.stdout.length > 0) continue;
@@ -177,7 +162,6 @@ export async function makeStage(p: {layout: Layout; session: Session; project: s
 			const own = owner(rel, repoPaths);
 			const gitDir = path.join(dst, own, '.git');
 			if (!(await isDir(gitDir)) || rel.includes('\n') || rel.includes('\r')) continue;
-			// The stage's git status stays clean even for a `node_modules/` rule, which does not match a symlink.
 			const info = path.join(gitDir, 'info');
 			await mkdir(info, {recursive: true});
 			const file = path.join(info, 'exclude');
@@ -192,7 +176,6 @@ export async function makeStage(p: {layout: Layout; session: Session; project: s
 }
 
 export type RepoResult = {
-	/** '' = the outer repository. */
 	repo: string;
 	files: number;
 	outcome: 'unchanged' | 'applied' | 'conflicts' | 'failed';
@@ -202,13 +185,10 @@ export type RepoResult = {
 export type ApplyResult = {
 	files: number;
 	repos: RepoResult[];
-	/** The record predates nested repositories: only the outer one was applied. */
 	legacy: boolean;
-	/** A legacy stage that has repositories inside it. */
 	legacyNested: boolean;
 };
 
-/** The stage's changes in dir since base, read through a private index so the stage's own stays as it is. */
 async function stagePatch(git: Git, dir: string, base: string | null, excludes: string[], tmp: string, name: string): Promise<Buffer> {
 	let from = base ?? (await head(git, dir));
 	if (from === null) {
@@ -223,7 +203,6 @@ async function stagePatch(git: Git, dir: string, base: string | null, excludes: 
 	await copyFile(path.join(gitDir, 'index'), index).catch(() => {});
 	const env = {GIT_INDEX_FILE: index};
 	const spec = ['--', '.', ...literalExcludes(excludes)];
-	// The excludes go to the diff only: add refuses a pathspec that names an ignored path.
 	const add = await git(dir, ['-c', 'advice.addEmbeddedRepo=false', 'add', '-A'], {env});
 	if (add.code !== 0) throw new Error(`git add failed in ${dir}: ${clip(add.stderr)}`);
 	const diff = await git(
@@ -237,12 +216,6 @@ async function stagePatch(git: Git, dir: string, base: string | null, excludes: 
 
 type Planned = {repo: string; base: string | null; inner: string[]; excludes: string[]; patch: Buffer; files: number};
 
-/**
- * Moves everything the stage changed since it was made (commits and uncommitted work, untracked
- * files included, ignored files not) into the project as uncommitted changes, for the outer
- * repository and every repository inside it. The stage itself and its indexes are left untouched.
- * Nothing is written until every target with changes is checked clean.
- */
 export async function applyStage(p: {layout: Layout; stage: StageRecord; git: Git}): Promise<ApplyResult> {
 	const {git, stage} = p;
 	const project = path.join(p.layout.workplace, stage.project);
@@ -342,7 +315,6 @@ async function applyPatch(git: Git, target: string, patch: Buffer): Promise<Pick
 			if (unmerged.code === 0 && unmerged.stdout.length > 0) return {outcome: 'conflicts', detail: oneLine(unmerged.stdout.toString('utf8'))};
 			return {outcome: 'failed', detail: oneLine(apply.stderr)};
 		}
-		// --3way stages what it applies; leave the project with plain uncommitted changes, as in the stage.
 		await git(target, ['reset', '--quiet']);
 		return {outcome: 'applied'};
 	} catch (error) {
@@ -350,7 +322,6 @@ async function applyPatch(git: Git, target: string, patch: Buffer): Promise<Pick
 	}
 }
 
-/** Removes a stage folder; refuses anything but the derived path of a real folder. */
 export async function removeStage(layout: Layout, sessionId: string, stage: StageRecord): Promise<void> {
 	const expected = stageDir(layout, stage.project, sessionId, stage.id);
 	if (stage.path !== expected) throw new Error(`Refusing to remove ${stage.path}`);
