@@ -63,7 +63,7 @@ Tests: `npm test` in this directory (they need `git`).
 
 ## Residual risks
 
-- Only Edit and Write are confined. Bash can write anywhere; the claude module only refuses Bash commands that name this module's data dir.
+- Edit and Write are confined by the claude module's policy hook; Bash by its sandbox (bubblewrap, claude's `src/chat/sandbox.ts`), which denies writes to every folder that is not isolated and follows isolation changes before each command. On an image without bubblewrap Bash can write anywhere (the chat warns); the claude module then only refuses Bash commands that name this module's data dir.
 - Symlinked project folders are not listed (the write check resolves symlinks, so they could never be written).
 - A stage copy cannot be cancelled midway and may take long for big folders; the assistant's command timeout still applies to the result.
 - `finish` deletes stages whose changes were never applied.
