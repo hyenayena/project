@@ -1,6 +1,6 @@
 import {mkdir} from 'node:fs/promises';
 import path from 'node:path';
-import type {Command, Logger} from '../../../src/api.js';
+import type {Command, Logger, Subcommand} from '../../../src/api.js';
 import {type Git, runGit} from './git.js';
 import {noopLog} from './log.js';
 import {findProject, listProjects} from './projects.js';
@@ -15,18 +15,52 @@ export type ProjectDeps = {
 	now?: () => Date;
 };
 
-const USAGE = 'project list | new <project> | isolate <project>… | stage make <project> | stage apply <project> <stageid> | finish';
+// The one-line form in usage errors.
+const LINE = 'project list | new <project> | isolate <project>… | stage make <project> | stage apply <project> <stageid> | finish';
+const USAGE = 'project <subcommand>';
+const PROJECT = {name: 'project', description: 'A project in the workplace or a docs-only one'};
 
-const HELP = [
-	`Usage: ${USAGE}`,
-	'  list                              List the projects, what is isolated and the stages',
-	'  new <project>                     Create a docs-only project: an empty docs folder, no workplace folder',
-	'  isolate <project>…                Make projects and their docs writable for this work session',
-	'  stage make <project>              Copy a project into a new stage; prints the stage path',
-	'  stage apply <project> <stageid>   Move a stage\'s changes into the project (as uncommitted changes)',
-	'  finish                            End the work session: everything read-only again, stages removed',
-	'Every project is read-only until it is isolated.',
-].join('\n');
+const subcommands: Subcommand[] = [
+	{name: 'list', aliases: ['ls'], usage: 'project list', description: 'List the projects, what is isolated and the stages', agent: 'safe'},
+	{
+		name: 'new',
+		usage: 'project new <project>',
+		description: 'Create a docs-only project: an empty docs folder, no workplace folder',
+		args: [{name: 'project', description: 'Name of the new project'}],
+		agent: 'confirm',
+	},
+	{
+		name: 'isolate',
+		usage: 'project isolate <project>…',
+		description: 'Make projects and their docs writable for this work session',
+		args: [PROJECT],
+		agent: 'confirm',
+	},
+	{
+		name: 'stage',
+		usage: 'project stage <subcommand>',
+		description: 'Make a stage copy of a project or apply its changes',
+		args: [{name: 'subcommand', description: 'make or apply'}],
+		agent: 'confirm',
+		subcommands: [
+			{
+				name: 'make',
+				usage: 'project stage make <project>',
+				description: 'Copy a project into a new stage; prints the stage path',
+				args: [PROJECT],
+				agent: 'confirm',
+			},
+			{
+				name: 'apply',
+				usage: 'project stage apply <project> <stageid>',
+				description: "Move a stage's changes into the project (as uncommitted changes)",
+				args: [PROJECT, {name: 'stageid', description: 'The stage, as project list shows it'}],
+				agent: 'confirm',
+			},
+		],
+	},
+	{name: 'finish', usage: 'project finish', description: 'End the work session: everything read-only again, stages removed', agent: 'confirm'},
+];
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 
@@ -196,20 +230,10 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 		name: 'project',
 		description: 'Projects in the workplace: isolate them for writing, stage copies',
 		usage: USAGE,
+		args: [{name: 'subcommand', description: 'What to do; see the subcommands'}],
+		notes: ['Every project is read-only until it is isolated'],
 		agent: 'confirm',
-		subcommands: [
-			{name: 'list', aliases: ['ls'], usage: 'project list', description: 'List projects, isolation and stages', agent: 'safe'},
-			{name: 'new', usage: 'project new <project>', description: 'Create a docs-only project', agent: 'confirm'},
-			{name: 'isolate', usage: 'project isolate <project>…', description: 'Make projects writable for this work session', agent: 'confirm'},
-			{
-				name: 'stage',
-				usage: 'project stage make <project> | apply <project> <stageid>',
-				description: 'Make a stage copy or apply its changes',
-				agent: 'confirm',
-			},
-			{name: 'finish', usage: 'project finish', description: 'End the work session and remove its stages', agent: 'confirm'},
-			{name: 'help', usage: 'project help', description: 'Show the usage', agent: 'safe'},
-		],
+		subcommands,
 		async run(args, ctx) {
 			const [sub, ...rest] = args;
 			const exact = (n: number, usage: string): void => {
@@ -218,8 +242,7 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 			switch (sub) {
 				case undefined:
 				case 'help':
-					ctx.print(HELP);
-					return;
+					return ctx.showHelp ? ctx.showHelp() : ctx.print(USAGE);
 				case 'list':
 				case 'ls':
 					exact(0, 'project list');
@@ -244,7 +267,7 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 					ctx.print(await serial(finish));
 					return;
 				default:
-					throw new Error(`Unknown subcommand: ${sub.slice(0, 64)}. Usage: ${USAGE}`);
+					throw new Error(`Unknown subcommand: ${sub.slice(0, 64)}. Usage: ${LINE}`);
 			}
 		},
 	};

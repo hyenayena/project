@@ -27,7 +27,9 @@ const run = async (...args: string[]): Promise<string> => {
 describe('project command', () => {
 	it('declares agent policies: list is safe, everything that changes access asks', () => {
 		const policy = Object.fromEntries((command.subcommands ?? []).map(s => [s.name, s.agent]));
-		assert.deepEqual(policy, {list: 'safe', new: 'confirm', isolate: 'confirm', stage: 'confirm', finish: 'confirm', help: 'safe'});
+		assert.deepEqual(policy, {list: 'safe', new: 'confirm', isolate: 'confirm', stage: 'confirm', finish: 'confirm'});
+		const stage = command.subcommands!.find(s => s.name === 'stage')!;
+		assert.deepEqual(stage.subcommands!.map(s => [s.name, s.agent]), [['make', 'confirm'], ['apply', 'confirm']]);
 		assert.equal(command.agent, 'confirm');
 	});
 
@@ -37,7 +39,11 @@ describe('project command', () => {
 		assert.match(out, /^ {2}notes +docs only$/m);
 		assert.match(out, /^ {2}web +files, docs$/m);
 		assert.match(out, /No work session: every project is read-only/);
-		assert.match(await run(), /^Usage: project list/);
+		assert.equal(await run(), 'project <subcommand>');
+		let shown = 0;
+		const {printed, ctx} = context();
+		await command.run(['help'], {...ctx, showHelp: () => void shown++});
+		assert.deepEqual([shown, printed], [1, []]);
 	});
 
 	it('isolates known projects only, creating their docs folder', async () => {
