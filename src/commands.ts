@@ -123,12 +123,12 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 		// The id is used up even if the copy fails, so a half-copied leftover is never reused.
 		s.nextStage += 1;
 		save(state);
-		const record = await makeStage({layout, session: s, project, id, git});
+		const record = await makeStage({layout, session: s, project, id, git, log});
 		const fresh = load();
 		if (!fresh.session || fresh.session.id !== s.id) throw new Error('The work session ended while the stage was being made');
 		fresh.session.stages.push(record);
 		save(fresh);
-		log.info('stage made', {id, isolated: fresh.session.isolated.includes(project)});
+		log.info('stage made', {id, isolated: fresh.session.isolated.includes(project), nested: record.nested?.length ?? 0, links: record.links?.length ?? 0});
 		return record.path;
 	};
 
@@ -140,11 +140,29 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 		const stage = s?.stages.find(x => x.project === project && x.id === id);
 		if (!s || !stage) throw new Error(`No stage ${id} of ${project} in this work session. Run "project list"`);
 		if (!s.isolated.includes(project)) throw new Error(`${project} is read-only; run "project isolate ${project}" first`);
-		const {files} = await applyStage({layout, stage, git});
-		log.info('stage applied', {id, files});
+		const result = await applyStage({layout, stage, git});
+		const changed = result.repos.filter(r => r.outcome !== 'unchanged');
+		const conflicts = changed.filter(r => r.outcome === 'conflicts').length;
+		const failed = changed.filter(r => r.outcome === 'failed').length;
+		log.info('stage applied', {id, files: result.files, repos: changed.length, conflicts, failed, legacy: result.legacy});
 		const target = path.join(layout.workplace, project);
-		if (files === 0) return `Stage ${id} has no changes; ${target} is unchanged.`;
-		return `Applied stage ${id} to ${target}: ${plural(files, 'file')} changed, left uncommitted. The stage is kept.`;
+		const note = result.legacy && result.legacyNested
+			? [`Stage ${id} was made before nested repositories were recorded; only the outer repository was applied.`]
+			: [];
+		if (changed.length === 0) return [`Stage ${id} has no changes; ${target} is unchanged.`, ...note].join('\n');
+		const only = changed[0];
+		if (changed.length === 1 && only?.repo === '' && only.outcome === 'applied') {
+			return [`Applied stage ${id} to ${target}: ${plural(result.files, 'file')} changed, left uncommitted. The stage is kept.`, ...note].join('\n');
+		}
+		const lines = changed.map(r => {
+			const label = r.repo === '' ? '. ' : r.repo;
+			if (r.outcome === 'applied') return `  ${label}: ${plural(r.files, 'file')} changed`;
+			if (r.outcome === 'conflicts') return `  ${label}: conflicts in: ${r.detail ?? ''}`;
+			return `  ${label}: not applied: ${r.detail ?? ''}`;
+		});
+		const report = [`Applied stage ${id} to ${target}:`, ...lines, ...note, 'Left uncommitted. The stage is kept.'].join('\n');
+		if (conflicts > 0 || failed > 0) throw new Error(report);
+		return report;
 	};
 
 	const finish = async (): Promise<string> => {

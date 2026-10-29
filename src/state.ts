@@ -24,7 +24,14 @@ export type StageRecord = {
 	path: string;
 	/** The project's HEAD when the stage was made; apply moves the stage's changes since then. */
 	base: string | null;
+	/** Repositories inside the project (relative paths); missing in records made before they were tracked. */
+	nested?: NestedBase[];
+	/** node_modules folders the stage links to instead of copying (relative paths). */
+	links?: string[];
 };
+
+/** A repository inside the project, with its HEAD when the stage was made. */
+export type NestedBase = {path: string; base: string | null};
 
 export type Session = {
 	id: string;
@@ -52,6 +59,35 @@ export const emptyState = (layout: Layout): ProjectState => ({v: STATE_VERSION, 
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
+export const MAX_NESTED = 64;
+export const MAX_LINKS = 256;
+const REL_MAX = 4096;
+
+/** A plain relative path inside a project: no `..`, `.`, `.git` or empty segments. */
+export function isRelPath(v: unknown): v is string {
+	if (typeof v !== 'string' || v === '' || v.length > REL_MAX || v.includes('\0')) return false;
+	if (path.posix.isAbsolute(v) || path.posix.normalize(v) !== v) return false;
+	return v.split('/').every(seg => seg !== '' && seg !== '.' && seg !== '..' && seg !== '.git');
+}
+
+const isBase = (v: unknown): v is string | null => v === null || (typeof v === 'string' && SHA_RE.test(v));
+
+function parseNested(v: unknown): NestedBase[] {
+	if (!Array.isArray(v) || v.length > MAX_NESTED) throw new Error('stage nested');
+	const out: NestedBase[] = [];
+	for (const n of v as unknown[]) {
+		if (!isRecord(n) || !isRelPath(n.path) || !isBase(n.base)) throw new Error('stage nested');
+		out.push({path: n.path, base: n.base});
+	}
+	if (new Set(out.map(n => n.path)).size !== out.length) throw new Error('stage nested');
+	return out;
+}
+
+function parseLinks(v: unknown): string[] {
+	if (!Array.isArray(v) || v.length > MAX_LINKS || !v.every(isRelPath) || new Set(v).size !== v.length) throw new Error('stage links');
+	return [...v] as string[];
+}
+
 function parseSession(raw: unknown, layout: Layout): Session | null {
 	if (raw === null) return null;
 	if (!isRecord(raw)) throw new Error('session');
@@ -68,8 +104,11 @@ function parseSession(raw: unknown, layout: Layout): Session | null {
 		if (sid < 1 || sid >= (nextStage as number)) throw new Error('stage id');
 		// A stage path is always derived, so a tampered file cannot point finish at another folder.
 		if (s.path !== stageDir(layout, s.project, id, sid)) throw new Error('stage path');
-		if (s.base !== null && (typeof s.base !== 'string' || !SHA_RE.test(s.base))) throw new Error('stage base');
-		out.push({project: s.project, id: sid, path: s.path, base: s.base});
+		if (!isBase(s.base)) throw new Error('stage base');
+		const record: StageRecord = {project: s.project, id: sid, path: s.path, base: s.base};
+		if (s.nested !== undefined) record.nested = parseNested(s.nested);
+		if (s.links !== undefined) record.links = parseLinks(s.links);
+		out.push(record);
 	}
 	return {id, startedAt, isolated: [...isolated] as string[], nextStage: nextStage as number, stages: out};
 }

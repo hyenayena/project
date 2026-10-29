@@ -26,8 +26,16 @@ Started by the first `isolate` or `stage make`, ended by `finish`. It is not tie
 
 ### Stages
 
-- `stage make` copies the folder as it is: uncommitted changes, ignored files (`node_modules`), symlinks as links. It records the project's `HEAD` as the stage's base. A stage of a project that is not isolated is read-only too.
-- `stage apply` requires the project to be isolated, both folders to be the top level of a git repository, and the project to have no uncommitted changes (untracked files count). It takes everything the stage changed since its base (commits and uncommitted work, untracked files included, ignored files not; read through a private index, so the stage's own index is untouched), applies it with `git apply --3way` and unstages it. The project ends up with plain uncommitted changes and no new commit. Conflicts leave conflict markers and fail the command with the list of files. A stage with no changes reports so.
+- `stage make` copies the folder as it is: uncommitted changes, ignored files, symlinks as links. It records the project's `HEAD` as the stage's base. A stage of a project that is not isolated is read-only too. It first scans the tree (no symlinks followed, `node_modules` contents skipped; depth 6, 50 000 folders, 64 repos, 256 links; going over a limit fails):
+  - every git-ignored `node_modules` without tracked files is not copied: the stage gets an absolute symlink to the original (so typecheck and tests work there) and an `info/exclude` line in the owning repo's `.git`, so the stage's status stays clean. A `node_modules` that is tracked or holds tracked files is copied.
+  - every nested git repo (a folder that is the top level of its own repo) gets its `HEAD` recorded as its own base.
+- `stage apply` requires the project to be isolated and, for every repo with changes, a clean top-level repo (untracked files count). It works in three phases:
+  1. Read the stage, no writes: recorded repos must be present, unrecorded repos in the stage are refused, git dirs must be inside the stage. For each repo (the outer one and each nested one) it takes everything changed since its base (commits and uncommitted work, untracked files included, ignored files not; read through a private index, so the stage's own index is untouched); nested repos and links are excluded from the outer patch.
+  2. Check the targets that have changes: clean, real folders (no symlinks in the path), top level of a repo. All failures are listed together and nothing is changed.
+  3. Apply with `git apply --3way` and unstage, outer repo first, then nested by path. A conflict or failure in one repo does not stop the others. The repos end up with plain uncommitted changes and no new commit.
+  
+  Conflicts leave markers. A project without nested repos reports as before (conflicts fail the command with the list of files; a stage with no changes reports so). Otherwise there is one line per repo (`  . : N files changed`, `  modules/x: conflicts in: …`, `  modules/y: not applied: …`) and the footer `Left uncommitted. The stage is kept.`; the command fails when any repo had conflicts or failed. A stage made before nested repos were recorded (no `nested` in its record) applies only the outer repo and says so when the stage has nested repos.
+- `finish` removes the links without touching the originals.
 
 ## How the read-only rule is enforced
 
@@ -44,12 +52,12 @@ The module writes its state to `<YENA_DATA>/project/state.json` (atomically, als
 		"startedAt": "2026-10-23T00:00:00.000Z",
 		"isolated": ["web"],
 		"nextStage": 2,
-		"stages": [{"project": "web", "id": 1, "path": "/stage/web-stage-3f9a1c2e-1", "base": "<sha or null>"}]
+		"stages": [{"project": "web", "id": 1, "path": "/stage/web-stage-3f9a1c2e-1", "base": "<sha or null>", "nested": [{"path": "modules/x", "base": "<sha or null>"}], "links": ["node_modules"]}]
 	}
 }
 ```
 
-`session` is `null` outside a work session. The claude module allows Edit/Write under the workplace, the stage dir and the hub's `projects/` folder only inside the isolated projects' folders, docs folders and stages; see the claude README, "Projects". An invalid file locks every project there and makes this module's commands refuse to run until it is fixed or deleted.
+`nested` and `links` (relative paths, checked on load) are always written; a record without them predates nested support. `src/public.ts` ignores both. `session` is `null` outside a work session. The claude module allows Edit/Write under the workplace, the stage dir and the hub's `projects/` folder only inside the isolated projects' folders, docs folders and stages; see the claude README, "Projects". An invalid file locks every project there and makes this module's commands refuse to run until it is fixed or deleted.
 
 ## Workflow
 
@@ -68,3 +76,6 @@ Tests: `npm test` in this directory (they need `git`).
 - A stage copy cannot be cancelled midway and may take long for big folders; the assistant's command timeout still applies to the result.
 - `finish` deletes stages whose changes were never applied.
 - Absolute symlinks inside a project point to the same targets from its stage.
+- `node_modules` in a stage is a link to the project's own: `npm install` (or anything else writing there) in a stage changes the real project, while it is isolated. No package installs in a stage.
+- Repos deeper than 6 levels are not found.
+- After a conflict or failure in one repo the others stay applied (partial apply, by design; the report names each).

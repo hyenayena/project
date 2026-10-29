@@ -112,6 +112,40 @@ describe('project command', () => {
 	});
 });
 
+describe('stage apply with nested repositories', () => {
+	const mono = path.join(layout.workplace, 'mono');
+	repo(mono, {'.gitignore': 'modules/\n', 'a.txt': 'a\n'});
+	repo(path.join(mono, 'modules', 'a'), {'x.txt': 'x\n'});
+	repo(path.join(mono, 'modules', 'b'), {'y.txt': 'y\n'});
+
+	it('reports every changed repository, and fails when one has conflicts', async () => {
+		await run('isolate', 'mono');
+		const first = await run('stage', 'make', 'mono');
+		const id = path.basename(first).split('-').pop();
+		writeFileSync(path.join(first, 'a.txt'), 'outer\n');
+		writeFileSync(path.join(first, 'modules', 'a', 'x.txt'), 'nested\n');
+		assert.equal(
+			await run('stage', 'apply', 'mono', id ?? ''),
+			`Applied stage ${id} to ${mono}:\n  . : 1 file changed\n  modules/a: 1 file changed\nLeft uncommitted. The stage is kept.`,
+		);
+		git(mono, 'checkout', '--', '.');
+		git(path.join(mono, 'modules', 'a'), 'checkout', '--', '.');
+
+		const second = await run('stage', 'make', 'mono');
+		const id2 = path.basename(second).split('-').pop() ?? '';
+		writeFileSync(path.join(second, 'modules', 'a', 'x.txt'), 'stage side\n');
+		writeFileSync(path.join(second, 'modules', 'b', 'y.txt'), 'y changed\n');
+		writeFileSync(path.join(mono, 'modules', 'a', 'x.txt'), 'project side\n');
+		git(path.join(mono, 'modules', 'a'), 'commit', '-qam', 'project side');
+		await assert.rejects(
+			run('stage', 'apply', 'mono', id2),
+			/Error: Applied stage \d+ to .*mono:\n {2}modules\/a: conflicts in: x\.txt\n {2}modules\/b: 1 file changed\nLeft uncommitted/,
+		);
+		assert.equal(readFileSync(path.join(mono, 'modules', 'b', 'y.txt'), 'utf8'), 'y changed\n');
+		await run('finish');
+	});
+});
+
 describe('plugin', () => {
 	it('puts docs in the md hub next to its data dir and writes the state at load', async () => {
 		assert.equal(layoutFor('/data/project').md, '/data/md/projects');

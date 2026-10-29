@@ -1,8 +1,10 @@
-import {cp, copyFile, lstat, mkdir, mkdtemp, realpath, rm} from 'node:fs/promises';
+import {appendFile, cp, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
+import type {Logger} from '../../../src/api.js';
 import type {Git} from './git.js';
-import {type Layout, type Session, stageDir, type StageRecord} from './state.js';
+import {noopLog} from './log.js';
+import {isRelPath, type Layout, MAX_LINKS, MAX_NESTED, type NestedBase, type Session, stageDir, type StageRecord} from './state.js';
 
 const ERR_MAX = 2000;
 
@@ -10,6 +12,8 @@ const clip = (s: string): string => {
 	const t = s.trim();
 	return t.length > ERR_MAX ? `${t.slice(0, ERR_MAX)}…` : t;
 };
+
+const oneLine = (s: string): string => clip(s.split('\n').map(l => l.trim()).filter(Boolean).join(', '));
 
 async function isDir(p: string): Promise<boolean> {
 	const st = await lstat(p).catch(() => undefined);
@@ -22,38 +26,222 @@ async function head(git: Git, dir: string): Promise<string | null> {
 	return r.stdout.toString('utf8').trim() || null;
 }
 
-/** The folder must be the top level of its own repository (not a folder inside another one). */
-async function requireRepo(git: Git, dir: string, what: string): Promise<void> {
+async function isTopLevel(git: Git, dir: string): Promise<boolean> {
 	const r = await git(dir, ['rev-parse', '--show-toplevel']);
 	const top = r.stdout.toString('utf8').trim();
-	if (r.code !== 0 || top === '' || (await realpath(top)) !== (await realpath(dir))) {
-		throw new Error(`The ${what} ${dir} is not the top level of a git repository`);
-	}
+	if (r.code !== 0 || top === '') return false;
+	return (await realpath(top)) === (await realpath(dir));
 }
 
-/** Copies the project folder as it is (uncommitted changes, ignored files, symlinks as links). */
-export async function makeStage(p: {layout: Layout; session: Session; project: string; id: number; git: Git}): Promise<StageRecord> {
+/** The folder must be the top level of its own repository (not a folder inside another one). */
+async function requireRepo(git: Git, dir: string, what: string): Promise<void> {
+	if (!(await isTopLevel(git, dir))) throw new Error(`The ${what} ${dir} is not the top level of a git repository`);
+}
+
+export type TreeScan = {repos: string[]; nodeModules: string[]};
+export type ScanLimits = {depth: number; folders: number; repos: number; nodeModules: number};
+
+const SCAN_LIMITS: ScanLimits = {depth: 6, folders: 50_000, repos: MAX_NESTED, nodeModules: MAX_LINKS};
+
+/**
+ * Finds the folders below root that hold a `.git` (repository candidates) and the node_modules
+ * folders, as sorted relative paths. Symlinks are never followed; node_modules and `.git` are not
+ * read into; folders deeper than the depth limit are not read.
+ */
+export async function scanTree(root: string, limits: ScanLimits = SCAN_LIMITS): Promise<TreeScan> {
+	const repos: string[] = [];
+	const nodeModules: string[] = [];
+	let level = [''];
+	let visited = 0;
+	for (let depth = 0; level.length > 0; depth++) {
+		const next: string[] = [];
+		for (const rel of level) {
+			if (++visited > limits.folders) throw new Error(`${root} has too many folders to stage`);
+			const dir = path.join(root, rel);
+			const entries = await readdir(dir, {withFileTypes: true}).catch((error: NodeJS.ErrnoException) => {
+				throw new Error(`Cannot read ${dir}: ${error.code ?? 'read failed'}`);
+			});
+			for (const e of entries) {
+				const child = rel === '' ? e.name : `${rel}/${e.name}`;
+				if (e.name === '.git') {
+					if (rel !== '') repos.push(rel);
+				} else if (e.isDirectory()) {
+					if (e.name === 'node_modules') nodeModules.push(child);
+					else if (depth < limits.depth) next.push(child);
+				}
+			}
+			if (repos.length > limits.repos) throw new Error(`${root} has too many nested repositories to stage`);
+			if (nodeModules.length > limits.nodeModules) throw new Error(`${root} has too many node_modules folders to stage`);
+		}
+		level = next;
+	}
+	return {repos: repos.sort(), nodeModules: nodeModules.sort()};
+}
+
+/** The absolute path of rel below root; every segment must be a real folder, not a symlink. */
+async function insideDir(root: string, rel: string): Promise<string> {
+	if (!isRelPath(rel)) throw new Error(`Invalid path ${JSON.stringify(rel)} in ${root}`);
+	let dir = root;
+	for (const seg of rel.split('/')) {
+		dir = path.join(dir, seg);
+		if (!(await isDir(dir))) throw new Error(`${dir} is not a folder (or is a symlink)`);
+	}
+	return dir;
+}
+
+/** A `.git` file may point anywhere, e.g. into the original project; the stage must not write there. */
+async function gitDirInside(git: Git, dir: string, root: string): Promise<void> {
+	const r = await git(dir, ['rev-parse', '--absolute-git-dir']);
+	const gitDir = r.stdout.toString('utf8').trim();
+	if (r.code !== 0 || gitDir === '') throw new Error(`git rev-parse failed in ${dir}: ${clip(r.stderr)}`);
+	const real = await realpath(gitDir);
+	if (!real.startsWith((await realpath(root)) + path.sep)) throw new Error(`${dir} keeps its git data outside the stage`);
+}
+
+/** The deepest repository ('' = the outer one) that contains rel. */
+function owner(rel: string, repos: string[]): string {
+	let best = '';
+	for (const r of repos) if (rel.startsWith(`${r}/`) && r.length > best.length) best = r;
+	return best;
+}
+
+const relTo = (repo: string, rel: string): string => (repo === '' ? rel : rel.slice(repo.length + 1));
+
+const literalExcludes = (paths: string[]): string[] => paths.map(p => `:(exclude,literal)${p}`);
+
+/** Gitignore pattern that matches exactly this path, a symlink included. */
+const excludeLine = (rel: string): string => `/${rel.replace(/[\\*?[\] ]/g, '\\$&')}\n`;
+
+/**
+ * Copies the project folder as it is (uncommitted changes, ignored files, symlinks as links).
+ * Ignored node_modules folders become links to the project's own folders instead of copies.
+ */
+export async function makeStage(p: {layout: Layout; session: Session; project: string; id: number; git: Git; log?: Logger}): Promise<StageRecord> {
+	const {git} = p;
+	const log = p.log ?? noopLog;
 	const src = path.join(p.layout.workplace, p.project);
 	if (!(await isDir(src))) throw new Error(`${p.project} has no folder in ${p.layout.workplace}, so it cannot be staged`);
 	const dst = stageDir(p.layout, p.project, p.session.id, p.id);
 	await mkdir(p.layout.stage, {recursive: true});
 	if (await lstat(dst).catch(() => undefined)) throw new Error(`${dst} already exists`);
-	const base = await head(p.git, src);
+	const base = await head(git, src);
+	const scan = await scanTree(src);
+
+	const nested: NestedBase[] = [];
+	for (const rel of scan.repos) {
+		const dir = path.join(src, rel);
+		if (!(await isTopLevel(git, dir))) {
+			log.debug('not a repository', {depth: rel.split('/').length});
+			continue;
+		}
+		nested.push({path: rel, base: await head(git, dir)});
+	}
+	const repoPaths = nested.map(n => n.path);
+	const outerRepo = base !== null || (await isTopLevel(git, src));
+
+	const links: string[] = [];
+	for (const rel of scan.nodeModules) {
+		const own = owner(rel, repoPaths);
+		if (own !== '' || outerRepo) {
+			const dir = path.join(src, own);
+			const sub = relTo(own, rel);
+			const ignored = await git(dir, ['check-ignore', '-q', '--', sub]);
+			if (ignored.code === 1) continue;
+			if (ignored.code !== 0) throw new Error(`git check-ignore failed in ${dir}: ${clip(ignored.stderr)}`);
+			// An ignore rule does not untrack files already in the index; those must stay real copies.
+			const tracked = await git(dir, ['ls-files', '-z', '--', `:(literal)${sub}`]);
+			if (tracked.code !== 0) throw new Error(`git ls-files failed in ${dir}: ${clip(tracked.stderr)}`);
+			if (tracked.stdout.length > 0) continue;
+		}
+		links.push(rel);
+	}
+	if (![...repoPaths, ...links].every(isRelPath)) throw new Error(`${src} has a path that cannot be staged`);
+
+	const linkAbs = new Set(links.map(rel => path.join(src, rel)));
 	try {
-		await cp(src, dst, {recursive: true, verbatimSymlinks: true, errorOnExist: true, force: false, preserveTimestamps: true});
+		await cp(src, dst, {
+			recursive: true,
+			verbatimSymlinks: true,
+			errorOnExist: true,
+			force: false,
+			preserveTimestamps: true,
+			filter: s => !linkAbs.has(s),
+		});
 	} catch (error) {
 		await rm(dst, {recursive: true, force: true}).catch(() => {});
 		throw new Error(`Cannot copy ${src} to ${dst}: ${(error as NodeJS.ErrnoException).code ?? 'copy failed'}`);
 	}
-	return {project: p.project, id: p.id, path: dst, base};
+	try {
+		for (const rel of links) {
+			await symlink(path.join(src, rel), path.join(dst, rel), 'dir');
+			const own = owner(rel, repoPaths);
+			const gitDir = path.join(dst, own, '.git');
+			if (!(await isDir(gitDir)) || rel.includes('\n') || rel.includes('\r')) continue;
+			// The stage's git status stays clean even for a `node_modules/` rule, which does not match a symlink.
+			const info = path.join(gitDir, 'info');
+			await mkdir(info, {recursive: true});
+			const file = path.join(info, 'exclude');
+			const old = await readFile(file, 'utf8').catch(() => '');
+			await appendFile(file, `${old !== '' && !old.endsWith('\n') ? '\n' : ''}${excludeLine(relTo(own, rel))}`);
+		}
+	} catch (error) {
+		await rm(dst, {recursive: true, force: true}).catch(() => {});
+		throw error;
+	}
+	return {project: p.project, id: p.id, path: dst, base, nested, links};
 }
 
-export type ApplyResult = {files: number};
+export type RepoResult = {
+	/** '' = the outer repository. */
+	repo: string;
+	files: number;
+	outcome: 'unchanged' | 'applied' | 'conflicts' | 'failed';
+	detail?: string;
+};
+
+export type ApplyResult = {
+	files: number;
+	repos: RepoResult[];
+	/** The record predates nested repositories: only the outer one was applied. */
+	legacy: boolean;
+	/** A legacy stage that has repositories inside it. */
+	legacyNested: boolean;
+};
+
+/** The stage's changes in dir since base, read through a private index so the stage's own stays as it is. */
+async function stagePatch(git: Git, dir: string, base: string | null, excludes: string[], tmp: string, name: string): Promise<Buffer> {
+	let from = base ?? (await head(git, dir));
+	if (from === null) {
+		const empty = await git(dir, ['hash-object', '-t', 'tree', '/dev/null']);
+		from = empty.stdout.toString('utf8').trim();
+	}
+	const known = await git(dir, ['cat-file', '-e', `${from}^{tree}`]);
+	if (known.code !== 0) throw new Error(`The stage ${dir} no longer has its base commit ${from.slice(0, 12)}`);
+
+	const index = path.join(tmp, `index-${name}`);
+	const gitDir = (await git(dir, ['rev-parse', '--absolute-git-dir'])).stdout.toString('utf8').trim();
+	await copyFile(path.join(gitDir, 'index'), index).catch(() => {});
+	const env = {GIT_INDEX_FILE: index};
+	const spec = ['--', '.', ...literalExcludes(excludes)];
+	// The excludes go to the diff only: add refuses a pathspec that names an ignored path.
+	const add = await git(dir, ['-c', 'advice.addEmbeddedRepo=false', 'add', '-A'], {env});
+	if (add.code !== 0) throw new Error(`git add failed in ${dir}: ${clip(add.stderr)}`);
+	const diff = await git(
+		dir,
+		['diff', '--cached', '--binary', '--full-index', '--no-color', '--no-ext-diff', '--no-textconv', '--no-relative', '--src-prefix=a/', '--dst-prefix=b/', from, ...spec],
+		{env},
+	);
+	if (diff.code !== 0) throw new Error(`git diff failed in ${dir}: ${clip(diff.stderr)}`);
+	return diff.stdout;
+}
+
+type Planned = {repo: string; base: string | null; inner: string[]; excludes: string[]; patch: Buffer; files: number};
 
 /**
  * Moves everything the stage changed since it was made (commits and uncommitted work, untracked
- * files included, ignored files not) into the project as uncommitted changes. The stage itself and
- * its index are left untouched.
+ * files included, ignored files not) into the project as uncommitted changes, for the outer
+ * repository and every repository inside it. The stage itself and its indexes are left untouched.
+ * Nothing is written until every target with changes is checked clean.
  */
 export async function applyStage(p: {layout: Layout; stage: StageRecord; git: Git}): Promise<ApplyResult> {
 	const {git, stage} = p;
@@ -62,55 +250,103 @@ export async function applyStage(p: {layout: Layout; stage: StageRecord; git: Gi
 	if (!(await isDir(stage.path))) throw new Error(`The stage ${stage.path} is missing`);
 	await requireRepo(git, project, 'project');
 	await requireRepo(git, stage.path, 'stage');
+	await gitDirInside(git, stage.path, stage.path);
 
-	const status = await git(project, ['status', '--porcelain', '--untracked-files=all']);
-	if (status.code !== 0) throw new Error(`git status failed in ${project}: ${clip(status.stderr)}`);
-	if (status.stdout.length > 0) {
-		throw new Error(`${project} has uncommitted changes; commit or stash them before applying a stage`);
+	const legacy = stage.nested === undefined;
+	const nested = [...(stage.nested ?? [])].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+	let legacyNested = false;
+	if (legacy) {
+		legacyNested = await scanTree(stage.path).then(
+			s => s.repos.length > 0,
+			() => true,
+		);
+	} else {
+		const scan = await scanTree(stage.path);
+		const recorded = new Set(nested.map(n => n.path));
+		const found = new Set(scan.repos);
+		const missing = nested.filter(n => !found.has(n.path)).map(n => n.path);
+		if (missing.length > 0) throw new Error(`Repositories recorded for stage ${stage.id} are missing from ${stage.path}: ${missing.join(', ')}`);
+		const extra: string[] = [];
+		for (const rel of scan.repos) if (!recorded.has(rel) && (await isTopLevel(git, path.join(stage.path, rel)))) extra.push(rel);
+		if (extra.length > 0) {
+			throw new Error(
+				`${extra.join(', ')} in ${stage.path} were not in the project when the stage was made; remove them from the stage or copy them by hand`,
+			);
+		}
+		for (const n of nested) {
+			const dir = await insideDir(stage.path, n.path);
+			await requireRepo(git, dir, 'stage repository');
+			await gitDirInside(git, dir, stage.path);
+		}
 	}
 
-	let base = stage.base ?? (await head(git, stage.path));
-	if (base === null) {
-		const empty = await git(stage.path, ['hash-object', '-t', 'tree', '/dev/null']);
-		base = empty.stdout.toString('utf8').trim();
-	}
-	const known = await git(stage.path, ['cat-file', '-e', `${base}^{tree}`]);
-	if (known.code !== 0) throw new Error(`The stage ${stage.path} no longer has its base commit ${base.slice(0, 12)}`);
+	const repoPaths = nested.map(n => n.path);
+	const links = stage.links ?? [];
+	const plans: Planned[] = [{repo: '', base: stage.base}, ...nested.map(n => ({repo: n.path, base: n.base}))].map(r => {
+		const inner = repoPaths.filter(x => r.repo === '' || x.startsWith(`${r.repo}/`)).filter(x => x !== r.repo);
+		const owned = links.filter(l => owner(l, repoPaths) === r.repo);
+		return {
+			...r,
+			inner: inner.map(x => relTo(r.repo, x)),
+			excludes: [...inner, ...owned].map(x => relTo(r.repo, x)),
+			patch: Buffer.alloc(0),
+			files: 0,
+		};
+	});
 
 	const tmp = await mkdtemp(path.join(tmpdir(), 'yena-project-'));
 	try {
-		// A private index, so the stage's own staging area stays as it is.
-		const index = path.join(tmp, 'index');
-		const gitDir = (await git(stage.path, ['rev-parse', '--absolute-git-dir'])).stdout.toString('utf8').trim();
-		await copyFile(path.join(gitDir, 'index'), index).catch(() => {});
-		const env = {GIT_INDEX_FILE: index};
-		const add = await git(stage.path, ['add', '-A'], {env});
-		if (add.code !== 0) throw new Error(`git add failed in ${stage.path}: ${clip(add.stderr)}`);
-		const diff = await git(
-			stage.path,
-			['diff', '--cached', '--binary', '--full-index', '--no-color', '--no-ext-diff', '--no-textconv', '--no-relative', '--src-prefix=a/', '--dst-prefix=b/', base],
-			{env},
-		);
-		if (diff.code !== 0) throw new Error(`git diff failed in ${stage.path}: ${clip(diff.stderr)}`);
-		const patch = diff.stdout;
-		const files = (patch.toString('latin1').match(/^diff --git /gm) ?? []).length;
-		if (files === 0) return {files: 0};
-
-		const apply = await git(project, ['apply', '--3way', '--whitespace=nowarn', '-'], {input: patch});
-		if (apply.code !== 0) {
-			const unmerged = await git(project, ['diff', '--name-only', '--diff-filter=U']);
-			if (unmerged.code === 0 && unmerged.stdout.length > 0) {
-				throw new Error(
-					`Stage ${stage.id} was applied to ${project} with conflicts; resolve the conflict markers in:\n${clip(unmerged.stdout.toString('utf8'))}`,
-				);
-			}
-			throw new Error(`Stage ${stage.id} could not be applied to ${project}; nothing was changed:\n${clip(apply.stderr)}`);
+		for (const [i, plan] of plans.entries()) {
+			plan.patch = await stagePatch(git, path.join(stage.path, plan.repo), plan.base, plan.excludes, tmp, String(i));
+			plan.files = (plan.patch.toString('latin1').match(/^diff --git /gm) ?? []).length;
 		}
-		// --3way stages what it applies; leave the project with plain uncommitted changes, as in the stage.
-		await git(project, ['reset', '--quiet']);
-		return {files};
 	} finally {
 		await rm(tmp, {recursive: true, force: true}).catch(() => {});
+	}
+
+	const changed = plans.filter(x => x.files > 0);
+	const targets = new Map<string, string>();
+	const problems: string[] = [];
+	for (const plan of changed) {
+		try {
+			const target = plan.repo === '' ? project : await insideDir(project, plan.repo);
+			await requireRepo(git, target, plan.repo === '' ? 'project' : 'project repository');
+			const status = await git(target, ['status', '--porcelain', '--untracked-files=all', '--', '.', ...literalExcludes(plan.inner)]);
+			if (status.code !== 0) throw new Error(`git status failed in ${target}: ${clip(status.stderr)}`);
+			if (status.stdout.length > 0) throw new Error(`${target} has uncommitted changes; commit or stash them before applying a stage`);
+			targets.set(plan.repo, target);
+		} catch (error) {
+			problems.push((error as Error).message);
+		}
+	}
+	if (problems.length === 1) throw new Error(problems[0]);
+	if (problems.length > 1) throw new Error(`Stage ${stage.id} was not applied; nothing was changed:\n${problems.map(m => `  ${m}`).join('\n')}`);
+
+	const repos: RepoResult[] = [];
+	for (const plan of plans) {
+		const target = targets.get(plan.repo);
+		if (plan.files === 0 || target === undefined) {
+			repos.push({repo: plan.repo, files: 0, outcome: 'unchanged'});
+			continue;
+		}
+		repos.push({repo: plan.repo, files: plan.files, ...(await applyPatch(git, target, plan.patch))});
+	}
+	return {files: repos.reduce((n, r) => n + r.files, 0), repos, legacy, legacyNested};
+}
+
+async function applyPatch(git: Git, target: string, patch: Buffer): Promise<Pick<RepoResult, 'outcome' | 'detail'>> {
+	try {
+		const apply = await git(target, ['apply', '--3way', '--whitespace=nowarn', '-'], {input: patch});
+		if (apply.code !== 0) {
+			const unmerged = await git(target, ['diff', '--name-only', '--diff-filter=U']);
+			if (unmerged.code === 0 && unmerged.stdout.length > 0) return {outcome: 'conflicts', detail: oneLine(unmerged.stdout.toString('utf8'))};
+			return {outcome: 'failed', detail: oneLine(apply.stderr)};
+		}
+		// --3way stages what it applies; leave the project with plain uncommitted changes, as in the stage.
+		await git(target, ['reset', '--quiet']);
+		return {outcome: 'applied'};
+	} catch (error) {
+		return {outcome: 'failed', detail: clip((error as Error).message)};
 	}
 }
 
