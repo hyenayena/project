@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 import path from 'node:path';
 import {after, describe, it} from 'node:test';
+import type {StyledBlock, StyledSpan} from '../../../src/api.js';
 import {createProjectCommand} from '../src/commands.js';
 import plugin, {createPlugin, layoutFor} from '../src/index.js';
 import {STATE_FILE} from '../src/state.js';
@@ -35,9 +36,9 @@ describe('project command', () => {
 
 	it('lists workplace and docs-only projects with no session', async () => {
 		const out = await run('list');
-		assert.match(out, /^ {2}api +files$/m);
-		assert.match(out, /^ {2}notes +docs only$/m);
-		assert.match(out, /^ {2}web +files, docs$/m);
+		assert.match(out, /^api  files$/m);
+		assert.match(out, /^notes  docs only$/m);
+		assert.match(out, /^web  files, docs$/m);
 		assert.match(out, /No work session: every project is read-only/);
 		assert.equal(await run(), 'project <subcommand>');
 		let shown = 0;
@@ -55,7 +56,7 @@ describe('project command', () => {
 		assert.match(out, /Isolated api, notes \(work session [0-9a-f]{8}\)/);
 		assert.ok(existsSync(path.join(layout.md, 'api')));
 		assert.deepEqual(state().session.isolated, ['api', 'notes']);
-		assert.match(await run('list'), /^ {2}api +files, docs +isolated$/m);
+		assert.match(await run('list'), /^api  files, docs  isolated$/m);
 	});
 
 	it('creates docs-only projects, never over an existing one', async () => {
@@ -69,7 +70,7 @@ describe('project command', () => {
 		assert.match(out, /run "project isolate draft"/);
 		assert.ok(existsSync(path.join(layout.md, 'draft')));
 		assert.ok(!existsSync(path.join(layout.workplace, 'draft')));
-		assert.match(await run('list'), /^ {2}draft +docs only$/m);
+		assert.match(await run('list'), /^draft  docs only$/m);
 		assert.ok(!state().session?.isolated.includes('draft'), 'a new project is not isolated');
 	});
 
@@ -85,12 +86,39 @@ describe('project command', () => {
 		assert.match(await run('list'), /web .*stages 1, 2/);
 	});
 
+	it('prints the list as styled blocks with tones', async () => {
+		const {printed, ctx} = context();
+		const styled: StyledBlock[][] = [];
+		await command.run(['list'], {...ctx, printStyled: blocks => void styled.push([...blocks])});
+		assert.deepEqual(printed, []);
+		const [blocks] = styled;
+		assert.deepEqual(blocks?.map(b => b.kind), ['line', 'table', 'line']);
+		const [intro, grid, session] = blocks as [Extract<StyledBlock, {kind: 'line'}>, Extract<StyledBlock, {kind: 'table'}>, Extract<StyledBlock, {kind: 'line'}>];
+		assert.deepEqual(intro.spans[0], {text: 'Projects', bold: true});
+		assert.equal((intro.spans[1] as StyledSpan).tone, 'muted');
+		assert.deepEqual(grid.head, ['Project', 'Where', 'State']);
+		const row = (name: string) => grid.rows.find(r => (r[0] as StyledSpan).text === name)!;
+		assert.deepEqual(row('api'), [{text: 'api', bold: true}, {text: 'files, docs', tone: 'muted'}, [{text: 'isolated', tone: 'ok'}]]);
+		assert.deepEqual(row('web')[2], [{text: 'stages 1, 2', tone: 'accent'}]);
+		assert.deepEqual(row('notes')[1], {text: 'docs only', tone: 'muted'});
+		assert.deepEqual(session.spans.slice(0, 2), [{text: 'Work session ', bold: true}, {text: state().session.id, tone: 'accent'}]);
+		assert.equal(session.spans[2], ': isolated api, notes, 2 stages.');
+	});
+
 	it('applies only stages of isolated projects', async () => {
 		const sid = state().session.id;
 		const stage = path.join(layout.stage, `web-stage-${sid}-1`);
 		writeFileSync(path.join(stage, 'a.txt'), 'staged\n');
 		await assert.rejects(run('stage', 'apply', 'web', '1'), /web is read-only; run "project isolate web" first/);
 		await run('isolate', 'web');
+		assert.match(await run('list'), /^web  files, docs  isolated  stages 1, 2$/m);
+		const {ctx} = context();
+		let cell: unknown;
+		await command.run(['list'], {...ctx, printStyled: blocks => {
+			const grid = blocks.find(b => b.kind === 'table') as Extract<StyledBlock, {kind: 'table'}>;
+			cell = grid.rows.find(r => (r[0] as StyledSpan).text === 'web')![2];
+		}});
+		assert.deepEqual(cell, [{text: 'isolated', tone: 'ok'}, '  ', {text: 'stages 1, 2', tone: 'accent'}]);
 		await assert.rejects(run('stage', 'apply', 'web', '9'), /No stage 9 of web/);
 		await assert.rejects(run('stage', 'apply', 'web', 'x'), /must be a number/);
 		assert.match(await run('stage', 'apply', 'web', '1'), /Applied stage 1 to .*web: 1 file changed, left uncommitted/);

@@ -1,6 +1,7 @@
 import {mkdir} from 'node:fs/promises';
 import path from 'node:path';
-import type {Command, Logger, Subcommand} from '../../../src/api.js';
+import type {Command, Logger, StyledBlock, StyledSpan, Subcommand} from '../../../src/api.js';
+import {line, printStyled, span, table} from './deps/core.js';
 import {type Git, runGit} from './git.js';
 import {noopLog} from './log.js';
 import {findProject, listProjects} from './projects.js';
@@ -84,30 +85,33 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 		return state.session;
 	};
 
-	const list = (): string => {
+	const list = (): StyledBlock[] => {
 		const state = load();
 		const projects = listProjects(layout);
 		const s = state.session;
-		const lines: string[] = [];
-		if (projects.length === 0) lines.push(`No projects in ${layout.workplace} or ${layout.md}`);
+		const blocks: StyledBlock[] = [];
+		if (projects.length === 0) blocks.push(line(`No projects in ${layout.workplace} or ${layout.md}`));
 		else {
-			lines.push(`Projects (files in ${layout.workplace}, docs in ${layout.md}):`);
-			const width = Math.max(...projects.map(p => p.name.length));
-			for (const p of projects) {
+			blocks.push(line(span('Projects', {bold: true}), span(` (files in ${layout.workplace}, docs in ${layout.md}):`, {tone: 'muted'})));
+			const rows = projects.map(p => {
 				const where = p.files && p.docs ? 'files, docs' : p.files ? 'files' : 'docs only';
-				const parts = [p.name.padEnd(width), where.padEnd(11)];
-				if (s?.isolated.includes(p.name)) parts.push('isolated');
+				const stateCell: (string | StyledSpan)[] = [];
+				if (s?.isolated.includes(p.name)) stateCell.push(span('isolated', {tone: 'ok'}));
 				const stages = s?.stages.filter(x => x.project === p.name).map(x => x.id) ?? [];
-				if (stages.length > 0) parts.push(`stages ${stages.join(', ')}`);
-				lines.push(`  ${parts.join('  ').trimEnd()}`);
-			}
+				if (stages.length > 0) {
+					if (stateCell.length > 0) stateCell.push('  ');
+					stateCell.push(span(`stages ${stages.join(', ')}`, {tone: 'accent'}));
+				}
+				return [span(p.name, {bold: true}), span(where, {tone: 'muted'}), stateCell];
+			});
+			blocks.push(table(rows, {head: ['Project', 'Where', 'State']}));
 		}
-		if (!s) lines.push('No work session: every project is read-only.');
+		if (!s) blocks.push(line(span('No work session: every project is read-only.', {tone: 'muted'})));
 		else {
 			const iso = s.isolated.length > 0 ? `isolated ${s.isolated.join(', ')}` : 'nothing isolated';
-			lines.push(`Work session ${s.id}: ${iso}, ${plural(s.stages.length, 'stage')}.`);
+			blocks.push(line(span('Work session ', {bold: true}), span(s.id, {tone: 'accent'}), `: ${iso}, ${plural(s.stages.length, 'stage')}.`));
 		}
-		return lines.join('\n');
+		return blocks;
 	};
 
 	const create = async (name: string): Promise<string> => {
@@ -242,7 +246,7 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 				case 'list':
 				case 'ls':
 					exact(0, 'project list');
-					ctx.print(await serial(async () => list()));
+					printStyled(ctx, await serial(async () => list()));
 					return;
 				case 'new':
 					exact(1, 'project new <project>');
