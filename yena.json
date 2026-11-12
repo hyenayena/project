@@ -1,13 +1,13 @@
 {
 	"name": "project",
-	"version": "0.4.1",
+	"version": "0.4.2",
 	"description": "Project management: mounted projects are read-only until isolated; stages copy a project for parallel work",
 	"runtime": "node",
 	"entry": "src/index.ts",
 	"dependencies": {
 		"core": {
 			"source": "core",
-			"version": "^0.22.0"
+			"version": "^0.22.4"
 		},
 		"md": {
 			"source": "md",

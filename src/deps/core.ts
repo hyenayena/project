@@ -1,1 +1,1 @@
-export {printStyled, span, line, table} from '../../../core/src/kit/text.js';
+export {commandError, printStyled, span, line, table} from '../../../core/src/kit/text.js';

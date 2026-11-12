@@ -19,6 +19,7 @@ mkdirSync(path.join(layout.md, 'web'));
 const command = createProjectCommand({layout, dataDir: box.dataDir, log: noopLog});
 const stateFile = path.join(box.dataDir, STATE_FILE);
 const state = () => (existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, 'utf8')) : {session: null});
+const failure = (kind: string, pattern: RegExp) => (error: Error & {kind?: string}) => error.kind === kind && pattern.test(error.message);
 const run = async (...args: string[]): Promise<string> => {
 	const {printed, ctx} = context();
 	await command.run(args, ctx);
@@ -48,9 +49,9 @@ describe('project command', () => {
 	});
 
 	it('isolates known projects only, creating their docs folder', async () => {
-		await assert.rejects(run('isolate'), /Usage: project isolate/);
-		await assert.rejects(run('isolate', 'ghost'), /Unknown project: ghost/);
-		await assert.rejects(run('isolate', '../web'), /Invalid project name/);
+		await assert.rejects(run('isolate'), failure('usage', /Usage: project isolate/));
+		await assert.rejects(run('isolate', 'ghost'), failure('not-found', /Unknown project: ghost/));
+		await assert.rejects(run('isolate', '../web'), failure('invalid', /Invalid project name/));
 		assert.equal(state().session, null, 'a failed isolate starts no session');
 		const out = await run('isolate', 'api', 'notes', 'api');
 		assert.match(out, /Isolated api, notes \(work session [0-9a-f]{8}\)/);
@@ -109,7 +110,7 @@ describe('project command', () => {
 		const sid = state().session.id;
 		const stage = path.join(layout.stage, `web-stage-${sid}-1`);
 		writeFileSync(path.join(stage, 'a.txt'), 'staged\n');
-		await assert.rejects(run('stage', 'apply', 'web', '1'), /web is read-only; run "project isolate web" first/);
+		await assert.rejects(run('stage', 'apply', 'web', '1'), failure('not-isolated', /web is read-only; run "project isolate web" first/));
 		await run('isolate', 'web');
 		assert.match(await run('list'), /^web  files, docs  isolated  stages 1, 2$/m);
 		const {ctx} = context();
@@ -140,9 +141,9 @@ describe('project command', () => {
 	});
 
 	it('rejects unknown subcommands and extra arguments', async () => {
-		await assert.rejects(run('nope'), /Unknown subcommand: nope/);
-		await assert.rejects(run('list', 'x'), /Usage: project list/);
-		await assert.rejects(run('finish', 'x'), /Usage: project finish/);
+		await assert.rejects(run('nope'), failure('usage', /Unknown subcommand: nope/));
+		await assert.rejects(run('list', 'x'), failure('usage', /Usage: project list/));
+		await assert.rejects(run('finish', 'x'), failure('usage', /Usage: project finish/));
 	});
 });
 

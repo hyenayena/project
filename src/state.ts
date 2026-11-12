@@ -2,6 +2,7 @@ import {randomBytes} from 'node:crypto';
 import {mkdirSync, readFileSync, renameSync, writeFileSync} from 'node:fs';
 import path from 'node:path';
 import {isProjectName, NAME_RE, STATE_FILE, STATE_VERSION} from './public.js';
+import {commandError} from './deps/core.js';
 
 export {NAME_RE, STATE_FILE, STATE_VERSION};
 const SESSION_RE = /^[0-9a-f]{8}$/;
@@ -37,7 +38,7 @@ export type ProjectState = Layout & {v: typeof STATE_VERSION; session: Session |
 export const isName = isProjectName;
 
 export function checkName(v: string | undefined): string {
-	if (!isName(v)) throw new Error('Invalid project name: use letters, digits, ".", "_" or "-" (up to 64)');
+	if (!isName(v)) throw commandError('invalid', 'Invalid project name: use letters, digits, ".", "_" or "-" (up to 64)');
 	return v;
 }
 

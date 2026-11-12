@@ -1,7 +1,7 @@
 import {mkdir} from 'node:fs/promises';
 import path from 'node:path';
 import type {Command, Logger, StyledBlock, StyledSpan, Subcommand} from '../../../src/api.js';
-import {line, printStyled, span, table} from './deps/core.js';
+import {commandError, line, printStyled, span, table} from './deps/core.js';
 import {type Git, runGit} from './git.js';
 import {noopLog} from './log.js';
 import {findProject, listProjects} from './projects.js';
@@ -116,7 +116,7 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 
 	const create = async (name: string): Promise<string> => {
 		const project = checkName(name);
-		if (findProject(layout, project)) throw new Error(`Project ${project} already exists. Run "project list"`);
+		if (findProject(layout, project)) throw commandError('invalid', `Project ${project} already exists. Run "project list"`);
 		const dir = path.join(layout.md, project);
 		await mkdir(dir, {recursive: true});
 		log.info('project created');
@@ -127,10 +127,10 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 	};
 
 	const isolate = async (names: string[]): Promise<string> => {
-		if (names.length === 0) throw new Error('Usage: project isolate <project>…');
+		if (names.length === 0) throw commandError('usage', 'Usage: project isolate <project>…');
 		const wanted = [...new Set(names.map(checkName))];
 		for (const name of wanted) {
-			if (!findProject(layout, name)) throw new Error(`Unknown project: ${name}. Run "project list"`);
+			if (!findProject(layout, name)) throw commandError('not-found', `Unknown project: ${name}. Run "project list"`);
 		}
 		const state = load();
 		const s = startSession(state);
@@ -151,8 +151,8 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 	const stageMake = async (name: string): Promise<string> => {
 		const project = checkName(name);
 		const info = findProject(layout, project);
-		if (!info) throw new Error(`Unknown project: ${project}. Run "project list"`);
-		if (!info.files) throw new Error(`${project} has docs only, nothing to stage`);
+		if (!info) throw commandError('not-found', `Unknown project: ${project}. Run "project list"`);
+		if (!info.files) throw commandError('invalid', `${project} has docs only, nothing to stage`);
 		const state = load();
 		const s = startSession(state);
 		const id = s.nextStage;
@@ -169,12 +169,12 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 
 	const stageApply = async (name: string, rawId: string): Promise<string> => {
 		const project = checkName(name);
-		if (!/^[1-9][0-9]{0,8}$/.test(rawId)) throw new Error('The stage id must be a number');
+		if (!/^[1-9][0-9]{0,8}$/.test(rawId)) throw commandError('invalid', 'The stage id must be a number');
 		const id = Number(rawId);
 		const s = load().session;
 		const stage = s?.stages.find(x => x.project === project && x.id === id);
-		if (!s || !stage) throw new Error(`No stage ${id} of ${project} in this work session. Run "project list"`);
-		if (!s.isolated.includes(project)) throw new Error(`${project} is read-only; run "project isolate ${project}" first`);
+		if (!s || !stage) throw commandError('not-found', `No stage ${id} of ${project} in this work session. Run "project list"`);
+		if (!s.isolated.includes(project)) throw commandError('not-isolated', `${project} is read-only; run "project isolate ${project}" first`);
 		const result = await applyStage({layout, stage, git});
 		const changed = result.repos.filter(r => r.outcome !== 'unchanged');
 		const conflicts = changed.filter(r => r.outcome === 'conflicts').length;
@@ -237,7 +237,7 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 		async run(args, ctx) {
 			const [sub, ...rest] = args;
 			const exact = (n: number, usage: string): void => {
-				if (rest.length !== n) throw new Error(`Usage: ${usage}`);
+				if (rest.length !== n) throw commandError('usage', `Usage: ${usage}`);
 			};
 			switch (sub) {
 				case undefined:
@@ -259,7 +259,7 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 					const [action, ...more] = rest;
 					if (action === 'make' && more.length === 1) ctx.print(await serial(() => stageMake(more[0] as string)));
 					else if (action === 'apply' && more.length === 2) ctx.print(await serial(() => stageApply(more[0] as string, more[1] as string)));
-					else throw new Error('Usage: project stage make <project> | project stage apply <project> <stageid>');
+					else throw commandError('usage', 'Usage: project stage make <project> | project stage apply <project> <stageid>');
 					return;
 				}
 				case 'finish':
@@ -267,7 +267,7 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 					ctx.print(await serial(finish));
 					return;
 				default:
-					throw new Error(`Unknown subcommand: ${sub.slice(0, 64)}. Usage: ${LINE}`);
+					throw commandError('usage', `Unknown subcommand: ${sub.slice(0, 64)}. Usage: ${LINE}`);
 			}
 		},
 	};
