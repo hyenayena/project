@@ -132,12 +132,13 @@ describe('project command', () => {
 		const sid = state().session.id;
 		const out = await run('finish');
 		assert.match(out, new RegExp(`Work session ${sid} finished: every project is read-only, 2 stages removed`));
+		assert.match(out, /The docs and task files of .*\bapi\b.* are read-only now/);
 		assert.ok(!existsSync(path.join(layout.stage, `web-stage-${sid}-1`)));
 		assert.equal(state().session, null);
 		assert.match(await run('finish'), /No work session to finish/);
 		const next = await run('stage', 'make', 'api');
 		assert.doesNotMatch(next, new RegExp(sid), 'a new session gets a new id');
-		await run('finish');
+		assert.doesNotMatch(await run('finish'), /task files/);
 	});
 
 	it('rejects unknown subcommands and extra arguments', async () => {

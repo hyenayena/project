@@ -220,10 +220,12 @@ export function createProjectCommand(deps: ProjectDeps): Command {
 			throw new Error(`Could not remove ${plural(failed.length, 'stage')}: ${failed.map(f => f.path).join(', ')}. Run "project finish" again`);
 		}
 		const removed = s.stages.length;
+		const names = s.isolated;
 		state.session = null;
 		save(state);
 		log.info('session finished', {stages: removed});
-		return `Work session ${s.id} finished: every project is read-only, ${plural(removed, 'stage')} removed.`;
+		const readOnly = names.length > 0 ? ` The docs and task files of ${names.join(', ')} are read-only now ("project isolate <name>" to change a task).` : '';
+		return `Work session ${s.id} finished: every project is read-only, ${plural(removed, 'stage')} removed.${readOnly}`;
 	};
 
 	return {
