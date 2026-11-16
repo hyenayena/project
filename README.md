@@ -37,6 +37,8 @@ Started by the first `isolate` or `stage make`, ended by `finish`. It is not tie
   Conflicts leave markers. A project without nested repos reports as before (conflicts fail the command with the list of files; a stage with no changes reports so). Otherwise there is one line per repo (`  . : N files changed`, `  modules/x: conflicts in: …`, `  modules/y: not applied: …`) and the footer `Left uncommitted. The stage is kept.`; the command fails when any repo had conflicts or failed. A stage made before nested repos were recorded (no `nested` in its record) applies only the outer repo and says so when the stage has nested repos.
 - `finish` removes the links without touching the originals.
 
+Export (`yena.json` `export.deny`): `state.json` (this machine's work session: isolated projects and stage paths).
+
 ## How the read-only rule is enforced
 
 The module writes its state to `<YENA_DATA>/project/state.json` (atomically, also at load so the paths are known before any command). Other modules never read this file themselves: they use the public entry `src/public.ts` (`accessReader(dataDir)` with `read`/`readSync` returning roots, docs and writable folders, `isolatedProjects`, `docsRootFor`, `stateFileFor`, `isProjectName`), the one reader of the format. The claude module loads it as an optional dependency and asks it on every file access. The file looks like this:
